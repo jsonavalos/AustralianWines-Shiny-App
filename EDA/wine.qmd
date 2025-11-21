@@ -1,0 +1,102 @@
+---
+title: "Australian Wines Forecasting"
+format: html
+params:
+  varietals: ["Shiraz", "Cabernet"]   # default varietals
+  start: !expr yearmonth("1990 Jan")  # default start date
+  end: !expr yearmonth("1995 Dec")    # default end date
+  train_end: !expr yearmonth("1994 Dec") # training cutoff
+  h: 12                               # forecast horizon
+---
+
+# Load libraries
+
+```{r}
+#| message: false
+library(tidyverse)
+library(fpp3)
+library(gt)
+```
+
+# 1. Load & Wrangle
+
+monthly sales of six types of Australian wines (red, rose, sweet white, dry white, sparkling, and fortified) for 1980-1994. Data available in AustralianWines.xls. The units are thousands of liters.
+
+```{r}
+
+aus_wine <- read_csv(here::here("EDA/AustralianWines.csv"), na = "*",
+                     col_types = cols(Rose = col_number()),
+                     show_col_types = FALSE) |> 
+    fill(Rose, .direction = "down") |> 
+    mutate(Month = mdy(str_replace(Month, '-', '-01-')) |> yearmonth()) 
+
+aus_wine_tsbl <- aus_wine |> as_tsibble(index = Month)
+
+#filtered_data <- wines |>
+#  filter(Varietal %in% params$varietals,
+#         Month >= params$start,
+#         Month <= params$end)
+
+aus_wine |> 
+    pivot_longer(cols = -Month, names_to = 'Varietal', values_to = 'Sales') |> 
+    ggplot(aes(Month, Sales)) +
+    geom_line() +
+    facet_wrap(~ Varietal, scales = "free_y") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# 2. Optional Decomposition
+
+```{r}
+filtered_data |>
+  model(STL = STL(Sales ~ season(window = "periodic"))) |>
+  components() |>
+  autoplot() +
+  labs(title = "Seasonal Decomposition")
+```
+
+# 3. Split
+
+```{r}
+training <- filtered_data |> filter_index(. <= params$train_end)
+validation <- filtered_data |> filter_index(. > params$train_end)
+```
+
+# 4. Model (per varietal)
+
+```{r}
+models <- training |>
+  model(
+    TSLM   = TSLM(Sales ~ trend() + season()),
+    ETS    = ETS(Sales),
+    ARIMA  = ARIMA(Sales)
+  )
+
+# Report model specifications
+report(models)
+```
+
+# 5. Forecast
+
+```{r}
+fc <- models |> forecast(h = params$h)
+fc_val <- models |> forecast(new_data = validation)
+```
+
+# 6. Evaluate
+
+```{r}
+train_acc <- accuracy(fc, training)
+val_acc   <- accuracy(fc_val, validation)
+print(train_acc)
+print(val_acc)
+```
+
+# 7. Visualize
+
+```{r}
+autoplot(filtered_data, Sales) +
+  autolayer(fc, level = 95) +
+  facet_wrap(~Varietal, scales = "free_y") +
+  labs(title = "Forecasts with Prediction Intervals")
+```
