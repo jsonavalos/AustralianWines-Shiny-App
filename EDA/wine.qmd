@@ -20,6 +20,22 @@ library(gt)
 
 # 1. Load & Wrangle
 
+-   Loads the AustralianWines dataset and forms a monthly `tsibble` keyed by `Varietal`. Yes!
+
+-   Provides interactive controls (varietal selection and date range) and at least one overview plot of the filtered data (a seasonality/decomposition view is optional but encouraged).
+
+-   Fits **TSLM**, **ETS**, and **ARIMA** models per selected varietal using auto-specification, with a clear **train/testing split** and user-defined **forecast horizon**.
+
+-   Reports model specifications — **MVP**: **ETS component form** (e.g., `ETS(M,A,M)`) and **ARIMA orders** `(p,d,q)(P,D,Q)[m]`. Parameters (e.g., smoothing weights, drift/constant) and TSLM details are **optional**.
+
+-   Reports **accuracy** for **training** and **testing** windows (e.g., RMSE/MAE/MAPE).
+
+-   Visualizes **comparative forecasts** with prediction intervals.
+
+-   Contains at least one more element that improves the forecast accuracy or user experience.
+
+-   Is **deployed** and accessible via a working URL.
+
 monthly sales of six types of Australian wines (red, rose, sweet white, dry white, sparkling, and fortified) for 1980-1994. Data available in AustralianWines.xls. The units are thousands of liters.
 
 ```{r}
@@ -31,24 +47,29 @@ aus_wine <- read_csv(here::here("EDA/AustralianWines.csv"), na = "*",
     mutate(Month = mdy(str_replace(Month, '-', '-01-')) |> yearmonth()) 
 
 aus_wine_tsbl <- aus_wine |> as_tsibble(index = Month)
-
+aus_wine_tsbl
 #filtered_data <- wines |>
 #  filter(Varietal %in% params$varietals,
 #         Month >= params$start,
 #         Month <= params$end)
 
-aus_wine |> 
-    pivot_longer(cols = -Month, names_to = 'Varietal', values_to = 'Sales') |> 
-    ggplot(aes(Month, Sales)) +
-    geom_line() +
-    facet_wrap(~ Varietal, scales = "free_y") +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+#aus_wine |> 
+#    pivot_longer(cols = -Month, names_to = 'Varietal', values_to = 'Sales') |> 
+#    ggplot(aes(Month, Sales)) +
+#    geom_line() +
+#    facet_wrap(~ Varietal, scales = "free_y") +
+#    theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
 # 2. Optional Decomposition
 
 ```{r}
-filtered_data |>
+#filtered_data <- aus_wine_tsbl |>
+#  filter(Varietal %in% params$varietals,
+#         Month >= params$start,
+#         Month <= params$end)
+
+ aus_wine_tsbl |>
   model(STL = STL(Sales ~ season(window = "periodic"))) |>
   components() |>
   autoplot() +
@@ -58,36 +79,46 @@ filtered_data |>
 # 3. Split
 
 ```{r}
-training <- filtered_data |> filter_index(. <= params$train_end)
-validation <- filtered_data |> filter_index(. > params$train_end)
+h = 12 # Months to forecast
+training <-  aus_wine_tsbl |> slice_head(n = nrow(aus_wine_tsbl) - h)
+testing <- aus_wine_tsbl |> slice_tail(n = h)
 ```
 
 # 4. Model (per varietal)
 
 ```{r}
-models <- training |>
+# Reshape wide → long: each wine type becomes a Varietal
+training_long <- training %>%
+  pivot_longer(cols = -Month, names_to = "Varietal", values_to = "Sales") %>%
+  as_tsibble(index = Month, key = Varietal)
+
+# Fit models per varietal
+models <- training_long %>%
   model(
     TSLM   = TSLM(Sales ~ trend() + season()),
     ETS    = ETS(Sales),
     ARIMA  = ARIMA(Sales)
   )
-
-# Report model specifications
-report(models)
 ```
 
 # 5. Forecast
 
 ```{r}
-fc <- models |> forecast(h = params$h)
-fc_val <- models |> forecast(new_data = validation)
+
+testing_long <- testing %>%
+  pivot_longer(cols = -Month, names_to = "Varietal", values_to = "Sales") %>%
+  as_tsibble(index = Month, key = Varietal)
+
+fc <- models |> forecast(h = h)
+fc_val <- models |> forecast(new_data = testing_long)
 ```
 
 # 6. Evaluate
 
 ```{r}
-train_acc <- accuracy(fc, training)
-val_acc   <- accuracy(fc_val, validation)
+train_acc <- accuracy(fc, training_long)
+val_acc   <- accuracy(fc_val, testing_long)
+
 print(train_acc)
 print(val_acc)
 ```
@@ -95,6 +126,10 @@ print(val_acc)
 # 7. Visualize
 
 ```{r}
+filtered_data <- aus_wine_tsbl %>%
+  pivot_longer(cols = -Month, names_to = "Varietal", values_to = "Sales") %>%
+  as_tsibble(index = Month, key = Varietal)
+
 autoplot(filtered_data, Sales) +
   autolayer(fc, level = 95) +
   facet_wrap(~Varietal, scales = "free_y") +
