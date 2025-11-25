@@ -6,7 +6,7 @@
     "appmode": "shiny",
     "primary_rmd": null,
     "primary_html": null,
-    "content_category": "site",
+    "content_category": null,
     "has_parameters": false
   },
   "packages": {
