@@ -4118,6 +4118,15 @@
   "files": {
     "app.R": {
       "checksum": "bc01d8909d1a259a2a18df096f6ad1f5"
+    },
+    "EDA/AustralianWines.csv": {
+      "checksum": "6c734f279c3e6227df9f0c4ed086ec2a"
+    },
+    "EDA/wine.qmd": {
+      "checksum": "4d5163521b77455f2c55e6445a5073d4"
+    },
+    "README.md": {
+      "checksum": "e20f00fdf6a1b65ac4d86b797a6e0040"
     }
   },
   "users": null
