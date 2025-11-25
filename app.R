@@ -351,7 +351,7 @@ fc_months <- fc_h() %>%
   p <- autoplot(fc_h(), level = 95) +
     # Add actual data
     geom_line(
-      data = wines_long |> filter(Month %in% fc_months),
+      data = wines_long |> filter(Month %in% fc_months) |> filter(Varietal %in% input$varietals),
       aes(x = Month, y = Sales, colour = "Actual"),
       inherit.aes = FALSE
     ) +
