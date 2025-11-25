@@ -45,7 +45,7 @@ ui <- page_sidebar(
       "varietals",
       "Select varietals:",
       choices = sort(unique(wines_long$Varietal)),
-      selected = sort(unique(wines_long$Varietal)),
+      selected = c("Dry white", "Red", "Sweet white"),#sort(unique(wines_long$Varietal)), #c("Dry white", "Red", "Sweet white"),
       multiple = TRUE
     ),
     # Date range selection
