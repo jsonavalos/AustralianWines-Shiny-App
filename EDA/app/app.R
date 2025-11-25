@@ -10,6 +10,7 @@ library(fabletools)
 library(ggplot2)
 library(gt)
 library(lubridate)
+library(urca)
 
 # Load and clean data
 AustralianWines <- read_csv(
@@ -76,9 +77,7 @@ ui <- page_sidebar(
       "Models to fit:",
       choices = c("TSLM" = "TSLM", "ETS" = "ETS", "ARIMA" = "ARIMA"),
       selected = c("TSLM", "ETS", "ARIMA")
-    ),
-    # Download forecasts
-    downloadButton("download_fc", "Download forecasts (CSV)", class = "btn-primary")
+    )
   ),
   navset_card_tab(
     nav_panel("Overview",
@@ -86,11 +85,6 @@ ui <- page_sidebar(
                card_header("Wine Sales Overview"),
                plotOutput("overview_plot"),
                card_footer(uiOutput("overview_note"))
-             )),
-    nav_panel("Decomposition", 
-             card(
-               card_header("STL Decomposition"),
-               plotOutput("decomp_plot")
              )),
     nav_panel("Model Specifications", 
              card(
@@ -114,9 +108,7 @@ ui <- page_sidebar(
     nav_panel("Model Comparison",
              card(
                card_header("Best Model Selection"),
-               gt_output("best_models_gt"),
-               br(),
-               plotOutput("residuals_plot")
+               gt_output("best_models_gt")
              ))
   )
 )
@@ -150,42 +142,109 @@ end_yM   <- yearmonth(input$daterange[2])
     if(nrow(result) == 0) NULL else result
   })
 
-  # Models per varietal with user selection
-  models <- reactive({
-    req(training_long(), input$models_to_fit)
-    validate(
-      need(nrow(training_long()) > 24, "Need at least 24 observations for modeling"),
-      need(length(input$models_to_fit) > 0, "Please select at least one model")
-    )
-    
-    model_list <- list()
-    if("TSLM" %in% input$models_to_fit) {
-      model_list[["TSLM"]] <- TSLM(Sales ~ trend() + season())
-    }
-    if("ETS" %in% input$models_to_fit) {
-      model_list[["ETS"]] <- ETS(Sales)
-    }
-    if("ARIMA" %in% input$models_to_fit) {
-      model_list[["ARIMA"]] <- ARIMA(Sales)
-    }
-    
-    training_long() |> model(!!!model_list)
-  })
+  # ...existing code...
 
-  # Forecasts
-  fc_h <- reactive({
-    req(models(), input$h)
-    models() |> forecast(h = input$h)
-  })
 
-  fc_val <- reactive({
-    req(models(), validation_long())
-    if(!is.null(validation_long()) && nrow(validation_long()) > 0) {
-      models() |> forecast(new_data = validation_long())
+
+# 2) User-facing model overview table: Varietal × (TSLM / ETS(component) / ARIMA(order))
+output$model_overview <- renderTable({
+  req(models())
+  tryCatch({
+    m <- models()
+
+    key_cols <- intersect(c("Varietal"), names(m))
+    model_cols <- setdiff(names(m), key_cols)
+    if (length(model_cols) == 0) return(data.frame(Message = "No fitted model columns found"))
+
+    long <- m |>
+      pivot_longer(cols = all_of(model_cols), names_to = ".model", values_to = "fit")
+
+    safe_report_txt <- function(fit_obj) {
+      tryCatch(paste(capture.output(report(fit_obj)), collapse = "\n"), error = function(e) NA_character_)
+    }
+
+    long2 <- long |>
+      mutate(
+        report_txt = map_chr(fit, ~ safe_report_txt(.x)),
+        ETS_text   = if_else(.model == "ETS", str_extract(report_txt, "ETS\\([^\\)]+\\)"), NA_character_),
+        ARIMA_text = if_else(.model == "ARIMA", str_extract(report_txt, "ARIMA\\([^\\)]+\\)"), NA_character_),
+        TSLM_text  = if_else(.model == "TSLM", "<TSLM>", NA_character_),
+        ARIMA_text = if_else(.model == "ARIMA" & str_detect(report_txt, regex("drift", ignore_case = TRUE)),
+                             paste0(ARIMA_text, " w/ drift"), ARIMA_text)
+      )
+
+    wide <- long2 |>
+      pivot_wider(
+        id_cols = Varietal,
+        names_from = .model,
+        values_from = c(TSLM_text, ETS_text, ARIMA_text),
+        values_fn = list(~ coalesce(.x[1], NA_character_))
+      )
+
+    display <- wide |>
+      transmute(
+        Varietal,
+        TSLM  = coalesce(TSLM_text_TSLM, "<TSLM>"),
+        ETS   = coalesce(ETS_text_ETS, NA_character_),
+        ARIMA = coalesce(ARIMA_text_ARIMA, NA_character_)
+      )
+
+    as.data.frame(display)
+  }, error = function(e) {
+    data.frame(Message = "Model specifications not available")
+  })
+})
+# ...existing server code...
+
+models <- reactive({
+  req(training_long(), input$models_to_fit)
+  validate(
+    need(nrow(training_long()) > 24, "Need at least 24 observations for modeling"),
+    need(length(input$models_to_fit) > 0, "Please select at least one model")
+  )
+
+  model_list <- list()
+  if ("TSLM" %in% input$models_to_fit) model_list[["TSLM"]] <- TSLM(Sales ~ trend() + season())
+  if ("ETS"  %in% input$models_to_fit) model_list[["ETS"]]  <- ETS(Sales)
+  if ("ARIMA" %in% input$models_to_fit) model_list[["ARIMA"]] <- ARIMA(Sales)
+
+  withProgress(message = "Fitting models", value = 0, {
+    n_steps <- max(2, length(model_list) + 1)
+    incProgress(1 / n_steps, detail = "Preparing data...")
+    # Heavy work performed once (fable will fit per key internally)
+    res <- training_long() |> model(!!!model_list)
+    incProgress((n_steps - 1) / n_steps, detail = "Finalizing models...")
+    res
+  })
+})
+
+fc_h <- reactive({
+  req(models(), input$h)
+  withProgress(message = "Generating forecasts", value = 0, {
+    incProgress(0.2, detail = "Preparing models...")
+    res <- models() |> forecast(h = input$h)
+    incProgress(0.8, detail = "Assembling results...")
+    res
+  })
+})
+
+fc_val <- reactive({
+  req(models(), validation_long())
+  if (is.null(validation_long())) return(NULL)
+
+  withProgress(message = "Generating validation forecasts", value = 0, {
+    incProgress(0.2, detail = "Preparing validation data...")
+    if (nrow(validation_long()) > 0) {
+      res <- models() |> forecast(new_data = validation_long())
+      incProgress(0.8, detail = "Done")
+      res
     } else {
+      incProgress(1, detail = "No validation rows")
       NULL
     }
   })
+})
+# ...existing code...
 
   # Overview plot
   output$overview_plot <- renderPlot({
@@ -214,41 +273,26 @@ end_yM   <- yearmonth(input$daterange[2])
     ))
   })
 
-  # STL decomposition
-  output$decomp_plot <- renderPlot({
-    req(filtered())
-      filtered() |>
-        model(STL = STL(Sales ~ season(window = "periodic"))) |>
-        components() |>
-        autoplot() +
-        labs(title = "STL Decomposition") +
-        theme_minimal() +
-        facet_wrap(~ Varietal, scales = "free_y")
-  })
 
-  # Model specifications
-  output$model_specs <- renderTable({
-    req(models())
-    tryCatch({
-      specs <- glance(models()) |>
-        select(any_of(c("Varietal", ".model", "method", "order", "seasonal_order", "sigma2", "AIC", "BIC")))
-      
-      # Clean up the display
-      if("method" %in% names(specs)) {
-        specs <- specs |> mutate(method = as.character(method))
-      }
-      if("order" %in% names(specs)) {
-        specs <- specs |> mutate(order = as.character(order))
-      }
-      if("seasonal_order" %in% names(specs)) {
-        specs <- specs |> mutate(seasonal_order = as.character(seasonal_order))
-      }
-      
-      specs
-    }, error = function(e) {
-      data.frame(Message = "Model specifications not available")
-    })
-  })
+output$model_specs <- renderTable({
+  req(models())
+  
+  df <- models() |> as_tibble()
+  
+  # Conditionally mutate only if the column exists
+  if ("ARIMA" %in% names(df)) {
+    df <- df |> mutate(ARIMA = format(ARIMA))
+  }
+  if ("ETS" %in% names(df)) {
+    df <- df |> mutate(ETS = format(ETS))
+  }
+  if ("TSLM" %in% names(df)) {
+    df <- df |> mutate(TSLM = "Sales ~ trend() + season()")
+  }
+  
+  # Select only the columns that exist
+  df |> select(any_of(c("Varietal", "ARIMA", "ETS", "TSLM")))
+}, striped = TRUE)
 
   # Training accuracy
   output$train_gt <- render_gt({
@@ -294,36 +338,31 @@ select(any_of(c("Varietal", ".model", "RMSE", "MAE", "MAPE")))
     })
   })
 
+
+  
 output$forecast_plot <- renderPlot({
   req(fc_h())
-  autoplot(fc_h(), level = 95) +
+# Extract forecast months
+fc_months <- fc_h() %>%
+  as_tibble() %>%
+  pull(Month) %>%
+  unique()
+  # Forecasts (with intervals)
+  p <- autoplot(fc_h(), level = 95) +
+    # Add actual data
+    geom_line(
+      data = wines_long |> filter(Month %in% fc_months),
+      aes(x = Month, y = Sales, colour = "Actual"),
+      inherit.aes = FALSE
+    ) +
     facet_wrap(~ Varietal, scales = "free_y") +
-    labs(title = "Forecasts (future months only)",
-         x = "Month", y = "Sales (thousands of liters)") +
+     scale_fill_discrete(name = "Model and Confidence Interval") +  # Rename ribbon legend
+    #scale_colour_discrete(name = "Model") +
+    guides(colour = "none") +
     theme_minimal()
-})
 
-  # Download forecasts
-  output$download_fc <- downloadHandler(
-    filename = function() {
-      paste0("forecasts_", format(Sys.Date(), "%Y%m%d"), ".csv")
-    },
-    content = function(file) {
-      req(fc_h())
-      fc_tbl <- fc_h() |>
-        hilo(level = c(80, 95)) |>
-        as_tibble() |>
-        mutate(
-          `80%_lower` = map_dbl(`80%`, ~ .x$lower),
-          `80%_upper` = map_dbl(`80%`, ~ .x$upper),
-          `95%_lower` = map_dbl(`95%`, ~ .x$lower),
-          `95%_upper` = map_dbl(`95%`, ~ .x$upper)
-        ) |>
-        select(Month, Varietal, .model, Sales = .mean,
-               `80%_lower`, `80%_upper`, `95%_lower`, `95%_upper`)
-      write_csv(fc_tbl, file)
-    }
-  )
+  p
+})
 
   # Best model selection (lowest RMSE)
   output$best_models_gt <- render_gt({
@@ -344,25 +383,6 @@ output$forecast_plot <- renderPlot({
     })
   })
 
-  # Residual plot (bonus visualization)
-  output$residuals_plot <- renderPlot({
-    req(models())
-    tryCatch({
-      residuals <- augment(models()) |>
-        filter(.model %in% input$models_to_fit)
-
-      ggplot(residuals, aes(x = Month, y = .resid)) +
-        geom_line() +
-        facet_wrap(~ Varietal + .model, scales = "free_y") +
-        labs(title = "Model Residuals Over Time",
-             x = "Month", y = "Residuals") +
-        theme_minimal()
-    }, error = function(e) {
-      ggplot() +
-        annotate("text", x = 0.5, y = 0.5, label = "Residual plot not available") +
-        theme_void()
-    })
-  })
 }
 
 shinyApp(ui, server)
