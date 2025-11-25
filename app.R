@@ -76,7 +76,7 @@ ui <- page_sidebar(
       "models_to_fit",
       "Models to fit:",
       choices = c("TSLM" = "TSLM", "ETS" = "ETS", "ARIMA" = "ARIMA"),
-      selected = c("TSLM", "ETS", "ARIMA")
+      selected = c("ETS")
     )
   ),
   navset_card_tab(
